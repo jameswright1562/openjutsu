@@ -25,9 +25,12 @@ function handler(worker: "desktop" | "laptop") {
       const node = decodeURIComponent(path.split("/").at(-1) ?? "");
       result = { [node]: { input: { required: modelLists[node as keyof typeof modelLists] ?? {} } } };
     } else if (path === "/upload/image") {
-      for await (const _ of req) {} // stream request; no whole-upload buffering
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const upload = Buffer.concat(chunks).toString("latin1");
+      const extension = upload.match(/filename="[^"]+\.(mp4|png|jpg|jpeg|webp)"/i)?.[1]?.toLowerCase() ?? "png";
       const count = worker === "desktop" ? ++desktopUploads : ++laptopUploads;
-      result = { name: worker === "desktop" && count === 1 ? "clip.mp4" : `file-${count}.png`, subfolder: "picture" };
+      result = { name: `file-${count}.${extension}`, subfolder: "picture" };
     } else if (path === "/prompt") {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -90,7 +93,7 @@ test("From Picture routes preparation to desktop and selected H3 render to lapto
   assert.equal(render.status, 202);
   assert.deepEqual(await render.json(), { id: "laptop__laptop-job-1" });
   assert.equal(laptopGraphs.length, 1);
-  assert.equal(laptopGraphs[0]["1"].inputs.video, "picture/file-2.png");
+  assert.equal(laptopGraphs[0]["1"].inputs.video, "picture/file-2.mp4");
   assert.equal(laptopGraphs[0]["20"].class_type, "LoadImage");
   assert.equal(laptopInputRead, true);
   assert.equal(laptopUploads, 2); // prepared reference frame and original video
