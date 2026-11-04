@@ -7,7 +7,7 @@ import type { NodeInfo } from "../lib/progress.ts";
 import { clipCount, clipStarts } from "../lib/clips.ts";
 import { CLIP_SECONDS, DEFAULT_TARGET, MARGINS, MAX_SEED, MIN_SECTION_SECONDS, MOTION_SIZES, PLACES, placeStart, RESOLUTIONS, CUSTOM_SIZE, canvasSize, timecode, type Margin, type MotionSize, type Resolution, type Section, type Size } from "../lib/simple.ts";
 import { MAX_CHARACTERS } from "../lib/advanced.ts";
-import { ACCELERATIONS, DEFAULT_DESCRIBER, DEFAULT_MODEL, hasSpeedLora, isSpeedLora, MAX_LORAS, STEPS, STRENGTH, type Acceleration, type Lora, type ModelFiles } from "../lib/model.ts";
+import { ACCELERATIONS, DEFAULT_DESCRIBER, DEFAULT_MODEL, hasSpeedLora, isSpeedLora, isAbliteratedModel, MAX_LORAS, STEPS, STRENGTH, type Acceleration, type Lora, type ModelFiles } from "../lib/model.ts";
 import type { EditMode, FitSummary, PaintKeyframe, PlacementKeyframe } from "../lib/object.ts";
 import { Welcome } from "./welcome.tsx";
 import { ObjectPlacement } from "./object-placement.tsx";
@@ -156,9 +156,17 @@ const COLOR_SHARE: Record<string, number> = { ImageDetailContrast: 0.15, Orion4D
 // A picker over ComfyUI's files, or a text field when the list could not be read.
 function FilePicker({ value, options, onChange, label }: { value: string; options: string[]; onChange: (value: string) => void; label: string }) {
   if (!options.length) return <input className="file-name" aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} />;
+  const names = options.includes(value) ? options : [value, ...options];
+  const abliterated = names.filter(isAbliteratedModel);
+  const standard = names.filter((name) => !isAbliteratedModel(name));
   return (
     <select className="file-name" aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
-      {(options.includes(value) ? options : [value, ...options]).map((name) => <option key={name} value={name}>{name}</option>)}
+      {abliterated.length > 0 && <optgroup label="Abliterated variants (compatibility not verified)">
+        {abliterated.map((name) => <option key={name} value={name}>{name}{options.includes(name) ? "" : " — not installed"}</option>)}
+      </optgroup>}
+      <optgroup label="Other models installed in this worker">
+        {standard.map((name) => <option key={name} value={name}>{name}{options.includes(name) ? "" : " — not installed"}</option>)}
+      </optgroup>
     </select>
   );
 }
@@ -1084,7 +1092,7 @@ export function Openjutsu() {
                 <FilePicker label="Base model" value={model} options={files.models} onChange={setModel} />
               </div>
               <div className="setting">
-                <span>Visual describer <small>Reads pictures and video frames to write prompts. Use a vision-language model in models/text_encoders.</small></span>
+                <span>Visual describer <small>Reads pictures and video frames to write prompts. Use a compatible vision-language model in models/text_encoders; abliterated files are grouped first when installed.</small></span>
                 <FilePicker label="Visual describer" value={describer} options={files.textEncoders} onChange={setDescriber} />
               </div>
               <div className="setting">
