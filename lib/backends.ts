@@ -3,8 +3,8 @@ import { HttpError, validateJobId } from "./http.ts";
 
 export type WorkerId = "desktop" | "laptop";
 
-export function pictureVideoWorker(): WorkerId {
-  const configured = process.env.OPENJUTSU_PICTURE_RENDER_BACKEND?.trim() || "desktop";
+export function pictureVideoWorker(requested?: unknown): WorkerId {
+  const configured = requested === undefined ? process.env.OPENJUTSU_PICTURE_RENDER_BACKEND?.trim() || "desktop" : requested;
   if (configured !== "desktop" && configured !== "laptop") {
     throw new HttpError(503, "OPENJUTSU_PICTURE_RENDER_BACKEND must be desktop or laptop.");
   }
