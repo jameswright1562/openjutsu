@@ -14,6 +14,7 @@ const UPSAMPLER_STORAGE = "openjutsu.picture-upsampler";
 const DEFAULT_UPSAMPLER = "qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors";
 const MAX_SECONDS = 15;
 type Job = { id: string; stage: "prepare" | "describe" | "render" };
+type WorkerStatus = { id: "desktop" | "laptop"; online: boolean; gpu: string | null; vramBytes: number | null; ramBytes: number | null };
 
 export function FromPicture({ initialVideo, initialPicture, start: initialStart = 0, describer }: { initialVideo?: File; initialPicture?: File; start?: number; describer: string }) {
   const [video, setVideo] = useState<File | null>(initialVideo ?? null);
@@ -47,6 +48,7 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
   const [upsampler, setUpsampler] = useState(DEFAULT_UPSAMPLER);
   const [desktopEncoders, setDesktopEncoders] = useState<string[]>([]);
   const [desktopModelError, setDesktopModelError] = useState("");
+  const [workerStatuses, setWorkerStatuses] = useState<WorkerStatus[]>([]);
   const [result, setResult] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -122,6 +124,16 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
     const url = URL.createObjectURL(picture); setPictureUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [picture]);
+
+  async function refreshWorkers() {
+    try {
+      const response = await fetch("/api/workers");
+      if (!response.ok) return;
+      const data = await response.json();
+      if (Array.isArray(data.workers)) setWorkerStatuses(data.workers);
+    } catch {}
+  }
+  useEffect(() => { void refreshWorkers(); }, []);
 
   function remember(next: Job | null, image: string, accepted: boolean) {
     try { localStorage.setItem(STORAGE, JSON.stringify({ job: next, prepared: image, approved: accepted })); } catch {}
@@ -317,6 +329,12 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
          <option value="laptop">Windows laptop · RTX 4070 (remote ComfyUI)</option>
        </select></label>
        <p className="hint">FLUX preview and Qwen descriptions run on the desktop. Video and prepared image are copied to the chosen worker before rendering. The laptop must have ComfyUI, the required nodes, H3 models and OPENJUTSU_LAPTOP_COMFYUI_URL configured.</p>
+       <div className="row">
+         {workerStatuses.map((worker) => <small key={worker.id} role="status">{worker.id === "desktop" ? "Desktop" : "Laptop"}: {worker.online
+           ? `connected · ${worker.gpu ?? "GPU unknown"}${worker.vramBytes ? ` · ${(worker.vramBytes / 1024 ** 3).toFixed(1)} GB VRAM` : ""}`
+           : "offline / not configured"}</small>)}
+         <button className="secondary" disabled={busy} onClick={refreshWorkers}>Check workers</button>
+       </div>
       <label>Video description · H3 reads it with the normal-map video<textarea className="report" rows={6} value={description} disabled={busy} onChange={(event) => keepDescription(event.target.value)} /></label>
       <small>The visual describer (<code>{describer}</code>) watches the part, two frames a second, and writes its actions, held objects and expressions; with a character picture it then rewrites them for the prepared image. Remove anything about the video person's looks, clothes or setting. Leave it empty to render without it.</small>
       <div className="row"><button className="secondary" disabled={busy} onClick={describe}>Describe again</button><small>Describe again after changing the video length.</small></div>
