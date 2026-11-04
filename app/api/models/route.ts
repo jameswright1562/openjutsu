@@ -12,7 +12,9 @@ export async function GET(request: Request) {
   try {
     const backend = new URL(request.url).searchParams.get("backend");
     if (backend && backend !== "picture-video") return NextResponse.json({ error: "Unknown model backend." }, { status: 400 });
-    return NextResponse.json(await listModels(backend === "picture-video" ? pictureVideoWorker() : "desktop"));
+    const requested = new URL(request.url).searchParams.get("worker");
+    if (requested && backend !== "picture-video") return NextResponse.json({ error: "Select a backend to choose its worker." }, { status: 400 });
+    return NextResponse.json(await listModels(backend === "picture-video" ? pictureVideoWorker(requested ?? undefined) : "desktop"));
   } catch {
     // Empty lists turn the pickers into text fields.
     return NextResponse.json({ models: [], loras: [], textEncoders: [], vaes: [], error: MODELS_UNAVAILABLE }, { status: 502 });
