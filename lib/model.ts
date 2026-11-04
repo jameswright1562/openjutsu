@@ -16,7 +16,7 @@ export type ModelFiles = { models: string[]; loras: string[]; textEncoders: stri
 // A naming hint, not a guarantee of compatibility or an absence of safeguards.
 // ComfyUI must still be able to load the file with the workflow's CLIPLoader type.
 export function isAbliteratedModel(name: string): boolean {
-  return /abliterat|(?:^|[/\\\\._-])ablit(?:[/\\\\._-]|$)/i.test(name);
+  return /abliterat|ablit/i.test(name);
 }
 
 export function abliteratedVisionModels(files: string[]): string[] {
