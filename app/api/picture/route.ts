@@ -135,7 +135,7 @@ export async function POST(request: Request) {
       let settings: PictureVideoSettings;
       try { settings = parsePictureVideoSettings(body.settings ?? { ...DEFAULT_PICTURE_VIDEO, seed: source["19"].inputs.seed }); }
       catch (error) { throw new HttpError(400, (error as Error).message); }
-      submitWorker = pictureVideoWorker();
+      submitWorker = pictureVideoWorker(body.worker);
       const available = await listModels(submitWorker);
       if (!available.models.includes(settings.model)) throw new HttpError(400, "Choose a video model ComfyUI has.");
       if (settings.renderer === "solar") {
@@ -189,6 +189,12 @@ export async function POST(request: Request) {
       const pictureExtension = character?.name.match(/\.(png|jpe?g|webp)$/i)?.[0];
       if (!extension || character && !pictureExtension) throw new HttpError(400, "Choose a supported video and PNG, JPEG or WebP picture.");
       graph = await template("prepare");
+      const upsampler = form.get("upsampler");
+      if (upsampler !== null) {
+        const name = String(upsampler).trim();
+        if (!(await listModels("desktop")).textEncoders.includes(name)) throw new HttpError(400, "Choose a prompt upsampler installed on desktop ComfyUI.");
+        graph["9"].inputs.clip_name = name;
+      }
       const prompt = form.get("prompt");
       if (typeof prompt === "string" && prompt.trim()) graph["6"].inputs.value = prompt;
       const [editWidth, editHeight] = canvasSize(width, height, "768p");
