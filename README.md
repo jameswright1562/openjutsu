@@ -4,6 +4,9 @@ An open-source, Genjutsu-style character and object swap for video. Drop a video
 
 The app is a small Next.js front end over a ComfyUI workflow. It uses [`@comfyorg/sdk`](https://www.npmjs.com/package/@comfyorg/sdk), following Comfy's [comfy-reshoot](https://github.com/Comfy-Org/comfy-reshoot) reference app.
 
+> **Fork feature — experimental multi-PC execution:** On Windows, OpenJutsu can keep From Picture FLUX preparation and descriptions on the desktop and send video generation to a laptop's ComfyUI. Render worker and available model files are selectable in the UI, including installed abliterated model variants when compatible. The standard Simple/Advanced workflows are still single-worker. See [Distributed workers setup](docs/distributed-workers.md).
+
+
 https://github.com/user-attachments/assets/2d8d763a-1764-49a6-9116-d6d1be661ff6
 
 | Advanced: several people, pick who becomes who | Object swap: paint where it goes |
