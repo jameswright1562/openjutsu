@@ -1,4 +1,5 @@
 import { HttpError, validateJobId, type StoredFile } from "./http.ts";
+import { comfyUrl, type WorkerId } from "./backends.ts";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -247,8 +248,8 @@ export async function submitPeople(video: StoredFile, section: Section, roles: s
 }
 
 // COMFYUI_URL points at ComfyUI itself, not the proxy: the proxy lists no nodes, models or presets.
-export async function comfyUi(path: string, timeout: number) {
-  const url = (process.env.COMFYUI_URL?.trim() || "http://127.0.0.1:8188").replace(/\/+$/, "");
+export async function comfyUi(path: string, timeout: number, worker: WorkerId = "desktop") {
+  const url = comfyUrl(worker);
   const response = await fetch(`${url}${path}`, { cache: "no-store", signal: AbortSignal.timeout(timeout) });
   if (!response.ok) throw new Error(`ComfyUI answered ${path} with HTTP ${response.status}.`);
   return response.json();
@@ -257,9 +258,9 @@ export async function comfyUi(path: string, timeout: number) {
 export const MODELS_UNAVAILABLE = "Could not read the model lists from ComfyUI. Make sure it is running and COMFYUI_URL points to it, then try again.";
 
 // The pickers read ComfyUI's own node info; when that fails, the page falls back to typed file names.
-export async function listModels(): Promise<ModelFiles> {
+export async function listModels(worker: WorkerId = "desktop"): Promise<ModelFiles> {
   const options = async (node: string, input: string) => {
-    const names = (await comfyUi(`/object_info/${node}`, 5000))?.[node]?.input?.required?.[input]?.[0];
+    const names = (await comfyUi(`/object_info/${node}`, 5000, worker))?.[node]?.input?.required?.[input]?.[0];
     if (!Array.isArray(names) || names.some((name) => typeof name !== "string")) throw new Error(`ComfyUI sent no ${input} list.`);
     return names as string[];
   };
