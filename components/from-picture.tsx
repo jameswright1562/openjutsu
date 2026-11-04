@@ -64,7 +64,7 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
     } catch {}
     try { setSettings(parsePictureVideoSettings(JSON.parse(localStorage.getItem(VIDEO_STORAGE) ?? "{}"))); } catch {}
     setSettingsLoaded(true);
-    fetch("/api/models").then(async (response) => {
+    fetch("/api/models?backend=picture-video").then(async (response) => {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error);
       setFiles({ models: data.models ?? [], loras: data.loras ?? [], textEncoders: data.textEncoders ?? [], vaes: data.vaes ?? [] });
