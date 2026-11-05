@@ -24,7 +24,7 @@ On the desktop:
    COMFY_BASE_URL=http://127.0.0.1:8189
    COMFYUI_URL=http://127.0.0.1:8188
    OPENJUTSU_LAPTOP_COMFYUI_URL=http://<laptop-ip>:8188
-   OPENJUTSU_PICTURE_RENDER_BACKEND=desktop
+   OPENJUTSU_PICTURE_RENDER_BACKEND=desktop # server fallback; select a worker in the UI
    ```
 
 4. Start OpenJutsu on your desktop. Open **Object swap → From picture**. Prepare a frame using FLUX on the desktop. Under **Video render settings**, select **Windows laptop** and choose the installed video model, encoder, LoRAs and VAEs. Submit a short, low-resolution test first.
