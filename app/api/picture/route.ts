@@ -73,7 +73,7 @@ async function copyVideoToWorker(inputName: string, worker: WorkerId): Promise<s
     await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), createWriteStream(file));
     return await uploadFile(await openAsBlob(file), match[0].toLowerCase(), worker);
   } finally {
-    await rm(folder, { recursive: true, force: true });
+    await rm(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch((error) => console.warn("Could not remove temporary transfer file:", error));
   }
 }
 
