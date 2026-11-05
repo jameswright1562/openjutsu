@@ -1,6 +1,6 @@
 "use client";
 
-import { DEFAULT_DESCRIBER } from "../lib/model.ts";
+import { abliteratedVisionModels, DEFAULT_DESCRIBER, isAbliteratedModel } from "../lib/model.ts";
 
 const SUGGESTIONS = [
   { name: "qwen3vl_8b_int8_convrot.safetensors", label: "Qwen3-VL 8B · INT8", size: "9.35 GB", note: "Openjutsu default", url: "https://huggingface.co/Comfy-Org/Qwen3-VL/blob/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors" },
@@ -13,8 +13,10 @@ export function Welcome({ value, options, onChange, loading, error, onRefresh, o
   onRefresh: () => void; onContinue: () => void;
 }) {
   const installed = !error && options.includes(value);
+  const abliterated = options.filter(isAbliteratedModel);
+  const visionAbliterated = abliteratedVisionModels(options);
   const suggested = SUGGESTIONS.filter((model) => options.includes(model.name));
-  const other = options.filter((name) => !SUGGESTIONS.some((model) => model.name === name));
+  const other = options.filter((name) => !SUGGESTIONS.some((model) => model.name === name) && !isAbliteratedModel(name));
 
   return <main className="shell welcome">
     <header className="top"><div className="brand">
@@ -41,6 +43,9 @@ export function Welcome({ value, options, onChange, loading, error, onRefresh, o
       <label htmlFor="describer">Visual describer</label>
       <select id="describer" className="file-name" value={value} onChange={(event) => onChange(event.target.value)} disabled={loading} aria-describedby="describer-help">
         {!options.includes(value) && <option value={value}>{value}{loading ? " — checking…" : " — not installed"}</option>}
+        {abliterated.length > 0 && <optgroup label="Abliterated variants installed — check vision support">
+          {abliterated.map((name) => <option key={name} value={name}>{name}</option>)}
+        </optgroup>}
         {suggested.length > 0 && <optgroup label="Suggested models installed in ComfyUI">
           {suggested.map((model) => <option key={model.name} value={model.name}>{model.label}{model.name === DEFAULT_DESCRIBER ? " (default)" : ""}</option>)}
         </optgroup>}
@@ -48,7 +53,8 @@ export function Welcome({ value, options, onChange, loading, error, onRefresh, o
           {other.map((name) => <option key={name} value={name}>{name}</option>)}
         </optgroup>}
       </select>
-      <p id="describer-help" className="hint">Other models must work with ComfyUI’s CLIPLoader and Generate Text nodes, including image and video-frame input. A file appearing here confirms it is installed; it does not confirm vision support. Text-only models and GGUF files needing a different loader cannot be used here.</p>
+      {visionAbliterated.length > 0 && <button className="secondary" disabled={loading} onClick={() => onChange(visionAbliterated[0])}>Choose an installed abliterated vision model</button>}
+      <p id="describer-help" className="hint">Abliterated labels come from filenames, not verified model metadata. Variants must still work with ComfyUI’s CLIPLoader and Generate Text nodes, including image and video-frame input. Other models must work with ComfyUI’s CLIPLoader and Generate Text nodes, including image and video-frame input. A file appearing here confirms it is installed; it does not confirm vision support. Text-only models and GGUF files needing a different loader cannot be used here.</p>
       <p className="hint">The separate MiniMax H3 text encoder stays in Model components. Choose a full vision-language model here, rather than an H3-specific encoder.</p>
 
       <div className="welcome-install">

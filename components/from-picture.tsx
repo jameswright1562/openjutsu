@@ -2,15 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 import { canvasSize, CUSTOM_SIZE, MAX_SEED, MIN_SECTION_SECONDS, MOTION_SIZES, PLACES, placeStart, RESOLUTIONS, timecode } from "../lib/simple.ts";
-import { MAX_LORAS, STEPS, STRENGTH } from "../lib/model.ts";
+import { isAbliteratedModel, MAX_LORAS, STEPS, STRENGTH } from "../lib/model.ts";
 import { DEFAULT_PICTURE_VIDEO, FRAME_RELIGHT_PROMPT, LIGHT_LOOKS, parsePictureVideoSettings, pictureFrames, RELIGHT_PROMPT, solarLoraFiles, type PictureVideoSettings } from "../lib/picture.ts";
 
 const PROMPT = "change <image 1> character pose follow the  <image 2> pose. keep the final image as same body cut as <image 2> . do not change the background of <image 1> and do not add anything extra in <image 1>.";
 const STORAGE = "openjutsu.picture-preview";
 const VIDEO_STORAGE = "openjutsu.picture-video-settings";
 const DESCRIPTION_STORAGE = "openjutsu.picture-description";
+const WORKER_STORAGE = "openjutsu.picture-worker";
+const UPSAMPLER_STORAGE = "openjutsu.picture-upsampler";
+const DEFAULT_UPSAMPLER = "qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors";
 const MAX_SECONDS = 15;
 type Job = { id: string; stage: "prepare" | "describe" | "render" };
+type WorkerStatus = { id: "desktop" | "laptop"; online: boolean; gpu: string | null; vramBytes: number | null; ramBytes: number | null };
 
 export function FromPicture({ initialVideo, initialPicture, start: initialStart = 0, describer }: { initialVideo?: File; initialPicture?: File; start?: number; describer: string }) {
   const [video, setVideo] = useState<File | null>(initialVideo ?? null);
@@ -39,6 +43,12 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [files, setFiles] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; vaes: string[] }>({ models: [], loras: [], textEncoders: [], vaes: [] });
   const [modelError, setModelError] = useState("");
+  const [renderWorker, setRenderWorker] = useState<"desktop" | "laptop">("desktop");
+  const [workerLoaded, setWorkerLoaded] = useState(false);
+  const [upsampler, setUpsampler] = useState(DEFAULT_UPSAMPLER);
+  const [desktopEncoders, setDesktopEncoders] = useState<string[]>([]);
+  const [desktopModelError, setDesktopModelError] = useState("");
+  const [workerStatuses, setWorkerStatuses] = useState<WorkerStatus[]>([]);
   const [result, setResult] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -64,20 +74,46 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
     } catch {}
     try { setSettings(parsePictureVideoSettings(JSON.parse(localStorage.getItem(VIDEO_STORAGE) ?? "{}"))); } catch {}
     setSettingsLoaded(true);
+    try {
+      const savedWorker = localStorage.getItem(WORKER_STORAGE);
+      if (savedWorker === "desktop" || savedWorker === "laptop") setRenderWorker(savedWorker);
+      const savedUpsampler = localStorage.getItem(UPSAMPLER_STORAGE);
+      if (savedUpsampler) setUpsampler(savedUpsampler);
+    } catch {}
+    setWorkerLoaded(true);
     fetch("/api/models").then(async (response) => {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error);
+      setDesktopEncoders(data.textEncoders ?? []);
+    }).catch((error) => setDesktopModelError(error.message));
+  }, []);
+  useEffect(() => {
+    if (!workerLoaded) return;
+    let canceled = false;
+    setModelError("");
+    setFiles({ models: [], loras: [], textEncoders: [], vaes: [] });
+    fetch(`/api/models?backend=picture-video&worker=${renderWorker}`).then(async (response) => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      if (canceled) return;
       setFiles({ models: data.models ?? [], loras: data.loras ?? [], textEncoders: data.textEncoders ?? [], vaes: data.vaes ?? [] });
       setSettings((current) => {
         const defaults = solarLoraFiles(current.solarRank), installed = solarLoraFiles(current.solarRank, data.loras ?? []);
         return { ...current, solarFourStep: current.solarFourStep === defaults.solarFourStep ? installed.solarFourStep : current.solarFourStep,
           solarControl: current.solarControl === defaults.solarControl ? installed.solarControl : current.solarControl };
       });
-    }).catch((error) => setModelError(error.message));
-  }, []);
+    }).catch((error) => { if (!canceled) setModelError(error.message); });
+    try {
+      localStorage.setItem(WORKER_STORAGE, renderWorker);
+    } catch {}
+    return () => { canceled = true; };
+  }, [renderWorker, workerLoaded]);
   useEffect(() => {
     if (settingsLoaded) try { localStorage.setItem(VIDEO_STORAGE, JSON.stringify(settings)); } catch {}
   }, [settings, settingsLoaded]);
+  useEffect(() => {
+    if (workerLoaded) try { localStorage.setItem(UPSAMPLER_STORAGE, upsampler); } catch {}
+  }, [upsampler, workerLoaded]);
   useEffect(() => {
     if (!video) return;
     const url = URL.createObjectURL(video); setVideoUrl(url); setSize(null);
@@ -88,6 +124,16 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
     const url = URL.createObjectURL(picture); setPictureUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [picture]);
+
+  async function refreshWorkers() {
+    try {
+      const response = await fetch("/api/workers");
+      if (!response.ok) return;
+      const data = await response.json();
+      if (Array.isArray(data.workers)) setWorkerStatuses(data.workers);
+    } catch {}
+  }
+  useEffect(() => { void refreshWorkers(); }, []);
 
   function remember(next: Job | null, image: string, accepted: boolean) {
     try { localStorage.setItem(STORAGE, JSON.stringify({ job: next, prepared: image, approved: accepted })); } catch {}
@@ -144,6 +190,7 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
       form.set("width", String(size[0])); form.set("height", String(size[1])); form.set("prompt", ownPerson ? framePrompt : relight ? relightPrompt : prompt);
       if (ownPerson) { form.set("relight", "frame"); form.set("denoise", String(keepCrop ? denoise : 1)); } else if (picture) form.set("picture", picture);
       if (relight) form.set("light", light);
+      form.set("upsampler", upsampler);
       const response = await fetch("/api/picture", { method: "POST", body: form });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error);
@@ -166,7 +213,7 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
     if (!prepared || !preview || !approved) return;
     setSubmitting(true); setError(""); setResult("");
     try {
-      const response = await fetch("/api/picture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prepared, settings, description }) });
+      const response = await fetch("/api/picture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prepared, settings, description, worker: renderWorker }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error);
       const next: Job = { id: data.id, stage: "render" }; remember(next, prepared, true); setJob(next);
@@ -175,8 +222,14 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
   }
 
   function picker(label: string, value: string, options: string[], onChange: (value: string) => void) {
+    const choices = [...new Set([value, ...options])];
+    const special = choices.filter(isAbliteratedModel);
+    const normal = choices.filter((name) => !isAbliteratedModel(name));
     return <label><span>{label}</span>{options.length
-      ? <select className="file-name" aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>{[...new Set([value, ...options])].map((name) => <option key={name} value={name}>{name || "Choose a file"}</option>)}</select>
+      ? <select className="file-name" aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
+          {special.length > 0 && <optgroup label="Abliterated variants (compatibility unverified)">{special.map((name) => <option key={name} value={name}>{name}{options.includes(name) ? "" : " — not installed"}</option>)}</optgroup>}
+          <optgroup label="Other installed models">{normal.map((name) => <option key={name} value={name}>{name}{options.includes(name) ? "" : " — not installed"}</option>)}</optgroup>
+        </select>
       : <input className="file-name" aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} />}</label>;
   }
   const canvas = typeof settings.resolution === "string" ? canvasSize(size?.[0] ?? 768, size?.[1] ?? 1376, settings.resolution) : [settings.resolution.width, settings.resolution.height];
@@ -223,6 +276,9 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
         <p className="hint">{ownPerson ? "FLUX relights the frame itself: the same person, pose, framing and setting under a new light." : "Image 1 supplies the character and background. Image 2 supplies the pose and body cut."}</p>
         <p className="hint">Missing the FLUX model files? <a href="https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy" target="_blank" rel="noopener noreferrer">Download FLUX 3 Image Klein files</a>.</p>
         <p className="hint"><strong>Prompt upsampler required.</strong> This workflow needs the <a href="https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/blob/main/text_encoders/qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors" target="_blank" rel="noopener noreferrer">Qwen3.5 9B FLUX prompt upsampler</a> to expand the edit prompt before image generation. Download it into <code>ComfyUI/models/text_encoders</code>.</p>
+        {picker("FLUX prompt upsampler (desktop)", upsampler, desktopEncoders, (name) => { invalidate(); setUpsampler(name); })}
+        {desktopModelError && <p className="error" role="alert">{desktopModelError}</p>}
+        <p className="hint">Abliterated variants may be selected if installed, but must support image input and the FLUX 3 CLIPLoader type. Generic text-only or GGUF abliterated models are not drop-in replacements.</p>
         <label>Relight<select className="file-name" value={look} disabled={busy} onChange={(event) => { invalidate(); setLook(Number(event.target.value)); }}>
           {!ownPerson && <option value={-1}>Off · keep the picture's light</option>}
           {LIGHT_LOOKS.map((item, index) => <option key={item.name} value={index}>{item.name}</option>)}
@@ -268,6 +324,17 @@ export function FromPicture({ initialVideo, initialPicture, start: initialStart 
       <h2><span>4</span> Video render settings</h2>
       <div className="row"><img className="picture-reference" src={preview.url} alt="Approved FLUX image for the video" style={{ width: 120, maxHeight: 180 }} /><button className="secondary" disabled={busy} onClick={() => { setApproved(false); remember(null, prepared, false); }}>Back to image review</button></div>
       <p className="hint">The approved image is reused without running FLUX again. Native H3 and SolarRenderer render one clip, up to 15 seconds, without a context loop.</p>
+       <label>Video render worker<select className="file-name" disabled={busy} value={renderWorker} onChange={(event) => setRenderWorker(event.target.value as "desktop" | "laptop")}>
+         <option value="desktop">Desktop · RTX 3060 (local)</option>
+         <option value="laptop">Windows laptop · RTX 4070 (remote ComfyUI)</option>
+       </select></label>
+       <p className="hint">FLUX preview and Qwen descriptions run on the desktop. Video and prepared image are copied to the chosen worker before rendering. The laptop must have ComfyUI, the required nodes, H3 models and OPENJUTSU_LAPTOP_COMFYUI_URL configured.</p>
+       <div className="row">
+         {workerStatuses.map((worker) => <small key={worker.id} role="status">{worker.id === "desktop" ? "Desktop" : "Laptop"}: {worker.online
+           ? `connected · ${worker.gpu ?? "GPU unknown"}${worker.vramBytes ? ` · ${(worker.vramBytes / 1024 ** 3).toFixed(1)} GB VRAM` : ""}`
+           : "offline / not configured"}</small>)}
+         <button className="secondary" disabled={busy} onClick={refreshWorkers}>Check workers</button>
+       </div>
       <label>Video description · H3 reads it with the normal-map video<textarea className="report" rows={6} value={description} disabled={busy} onChange={(event) => keepDescription(event.target.value)} /></label>
       <small>The visual describer (<code>{describer}</code>) watches the part, two frames a second, and writes its actions, held objects and expressions; with a character picture it then rewrites them for the prepared image. Remove anything about the video person's looks, clothes or setting. Leave it empty to render without it.</small>
       <div className="row"><button className="secondary" disabled={busy} onClick={describe}>Describe again</button><small>Describe again after changing the video length.</small></div>

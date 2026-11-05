@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { openAsBlob } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { createWriteStream, openAsBlob } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { join } from "node:path";
 import { apiAccess, HttpError, IMAGE_SIGNATURE, readFormData, StoredFile, validateJobId, VIDEO_SIGNATURE } from "../../../lib/http.ts";
 import { canvasSize, isLink, MAX_SEED, type ApiGraph } from "../../../lib/simple.ts";
 import { listModels } from "../../../lib/comfy.ts";
+import { comfyUrl, parsePictureJobId, pictureJobId, pictureVideoWorker, type WorkerId } from "../../../lib/backends.ts";
 import { applyDescriber, DEFAULT_DESCRIBER } from "../../../lib/model.ts";
 import { applyDescription, applyFrameRelight, applyPictureVideoSettings, applyRelight, DEFAULT_PICTURE_VIDEO, parsePictureVideoSettings, pictureFrames, pictureLoras, solarLoraFiles, type PictureVideoSettings } from "../../../lib/picture.ts";
 
@@ -19,9 +23,11 @@ const FILE_CHECKS = {
 type OutputFile = { filename: string; subfolder?: string; type?: string };
 type History = { prompt?: [number, string, ApiGraph]; status?: { status_str?: string; completed?: boolean }; outputs?: Record<string, { images?: OutputFile[]; gifs?: OutputFile[]; text?: string[] }> };
 
-async function comfy(path: string, init?: RequestInit) {
-  const base = (process.env.COMFYUI_URL?.trim() || "http://127.0.0.1:8188").replace(/\/+$/, "");
-  const response = await fetch(`${base}${path}`, { ...init, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(30_000) });
+async function comfy(path: string, init?: RequestInit, worker: WorkerId = "desktop") {
+  const base = comfyUrl(worker);
+  // Media can be hundreds of MB. Uploads and downloads need a longer deadline than JSON API requests.
+  const timeout = path.startsWith("/view?") || path === "/upload/image" ? 10 * 60_000 : 30_000;
+  const response = await fetch(`${base}${path}`, { ...init, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(timeout) });
   if (!response.ok) {
     const data = await response.json().catch(() => null);
     const details = Object.values(data?.node_errors ?? {}).flatMap((node) => (node as { errors?: { message: string; details?: string }[] }).errors ?? [])
@@ -39,18 +45,42 @@ function view(file: OutputFile) {
   return `/view?${new URLSearchParams({ filename: file.filename, subfolder: file.subfolder ?? "", type: file.type ?? "output" })}`;
 }
 
-async function uploadFile(blob: Blob, extension: string) {
+async function uploadFile(blob: Blob, extension: string, worker: WorkerId = "desktop") {
   const form = new FormData();
   form.set("image", blob, `openjutsu_picture_${randomUUID()}${extension}`);
   form.set("type", "input");
-  const asset = await (await comfy("/upload/image", { method: "POST", body: form })).json();
+  const asset = await (await comfy("/upload/image", { method: "POST", body: form }, worker)).json();
   return asset.subfolder ? `${asset.subfolder}/${asset.name}` : asset.name;
 }
 
+// A video uploaded to the desktop's ComfyUI is not visible in the laptop's input directory.
+// Stream it through the OpenJutsu server to a temporary file, avoiding a 500 MB in-memory Blob.
+async function copyVideoToWorker(inputName: string, worker: WorkerId): Promise<string> {
+  if (worker === "desktop") return inputName;
+  const normalized = inputName.replaceAll("\\", "/");
+  const match = normalized.match(/\.(mp4|mov|mkv|webm|avi)$/i);
+  if (!match) throw new HttpError(400, "The prepared source video has an unsupported extension.");
+  const slash = normalized.lastIndexOf("/");
+  const response = await comfy(view({
+    filename: normalized.slice(slash + 1),
+    subfolder: slash < 0 ? "" : normalized.slice(0, slash),
+    type: "input",
+  }), undefined, "desktop");
+  if (!response.body) throw new HttpError(502, "Desktop ComfyUI did not return the source video.");
+  const folder = await mkdtemp(join(tmpdir(), "openjutsu-relay-"));
+  try {
+    const file = join(folder, "video" + match[0].toLowerCase());
+    await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), createWriteStream(file));
+    return await uploadFile(await openAsBlob(file), match[0].toLowerCase(), worker);
+  } finally {
+    await rm(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch((error) => console.warn("Could not remove temporary transfer file:", error));
+  }
+}
+
 async function history(id: string) {
-  validateJobId(id);
-  const data = await (await comfy(`/history/${encodeURIComponent(id)}`)).json();
-  const item: History | undefined = data[id];
+  const route = parsePictureJobId(id);
+  const data = await (await comfy(`/history/${encodeURIComponent(route.id)}`, undefined, route.worker)).json();
+  const item: History | undefined = data[route.id];
   if (item) {
     const graph = item.prompt?.[2];
     const prepared = graph?.["21"]?.class_type === "SaveImage" && graph["21"]._meta?.title === PREPARED;
@@ -76,6 +106,7 @@ export async function POST(request: Request) {
   let upload: Awaited<ReturnType<typeof readFormData>> | undefined;
   try {
     let graph: ApiGraph;
+    let submitWorker: WorkerId = "desktop";
     if (request.headers.get("Content-Type")?.startsWith("application/json")) {
       const body = await request.json();
       if (typeof body.prepared !== "string") throw new HttpError(400, "Prepare a picture first.");
@@ -104,17 +135,21 @@ export async function POST(request: Request) {
       let settings: PictureVideoSettings;
       try { settings = parsePictureVideoSettings(body.settings ?? { ...DEFAULT_PICTURE_VIDEO, seed: source["19"].inputs.seed }); }
       catch (error) { throw new HttpError(400, (error as Error).message); }
-      const available = await listModels();
+      submitWorker = pictureVideoWorker(body.worker);
+      const available = await listModels(submitWorker);
       if (!available.models.includes(settings.model)) throw new HttpError(400, "Choose a video model ComfyUI has.");
       if (settings.renderer === "solar") {
         const installed = solarLoraFiles(settings.solarRank, available.loras);
         const defaults = solarLoraFiles(settings.solarRank);
         for (const key of ["solarFourStep", "solarControl"] as const) if (settings[key] === defaults[key]) settings[key] = installed[key];
-        const nodes = await (await comfy("/object_info/SolarRendererLoraLoader")).json();
+        const nodes = await (await comfy("/object_info/SolarRendererLoraLoader", undefined, submitWorker)).json();
         if (!nodes.SolarRendererLoraLoader) throw new HttpError(400, "Install the SolarRenderer custom nodes and restart ComfyUI: https://github.com/Enderfga/SolarRenderer");
       }
       if (pictureLoras(settings).some((name) => !available.loras.includes(name))) throw new HttpError(400, "Choose LoRA files installed in ComfyUI/models/loras (subfolders are supported).");
-      const [clipInfo, vaeInfo] = await Promise.all([comfy("/object_info/CLIPLoader").then((response) => response.json()), comfy("/object_info/VAELoader").then((response) => response.json())]);
+      const [clipInfo, vaeInfo] = await Promise.all([
+        comfy("/object_info/CLIPLoader", undefined, submitWorker).then((response) => response.json()),
+        comfy("/object_info/VAELoader", undefined, submitWorker).then((response) => response.json()),
+      ]);
       for (const [name, choices, label] of [
         [settings.textEncoder, clipInfo.CLIPLoader.input.required.clip_name[0], "H3 text encoder"],
         [settings.videoVae, vaeInfo.VAELoader.input.required.vae_name[0], "video VAE"],
@@ -122,8 +157,8 @@ export async function POST(request: Request) {
       ] as const) if (!choices.includes(name)) throw new HttpError(400, `Choose a ${label} ComfyUI has.`);
       const picture = await (await comfy(view(file))).blob();
       graph = await template(settings.renderer === "solar" ? "solar" : "motion");
-      graph["20"] = { class_type: "LoadImage", inputs: { image: await uploadFile(picture, ".png") } };
-      graph["1"].inputs.video = source["1"].inputs.video;
+      graph["20"] = { class_type: "LoadImage", inputs: { image: await uploadFile(picture, ".png", submitWorker) } };
+      graph["1"].inputs.video = await copyVideoToWorker(String(source["1"].inputs.video), submitWorker);
       graph["1"].inputs.skip_first_frames = source["1"].inputs.skip_first_frames;
       applyPictureVideoSettings(graph, settings, Number(source["3"].inputs.width), Number(source["3"].inputs.height));
       if (typeof body.description === "string") applyDescription(graph, body.description);
@@ -154,6 +189,12 @@ export async function POST(request: Request) {
       const pictureExtension = character?.name.match(/\.(png|jpe?g|webp)$/i)?.[0];
       if (!extension || character && !pictureExtension) throw new HttpError(400, "Choose a supported video and PNG, JPEG or WebP picture.");
       graph = await template("prepare");
+      const upsampler = form.get("upsampler");
+      if (upsampler !== null) {
+        const name = String(upsampler).trim();
+        if (!(await listModels("desktop")).textEncoders.includes(name)) throw new HttpError(400, "Choose a prompt upsampler installed on desktop ComfyUI.");
+        graph["9"].inputs.clip_name = name;
+      }
       const prompt = form.get("prompt");
       if (typeof prompt === "string" && prompt.trim()) graph["6"].inputs.value = prompt;
       const [editWidth, editHeight] = canvasSize(width, height, "768p");
@@ -166,8 +207,8 @@ export async function POST(request: Request) {
       if (ownPerson) applyFrameRelight(graph, lit, denoise);
       else if (lit) applyRelight(graph, lit);
     }
-    const result = await (await comfy("/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph }) })).json();
-    return Response.json({ id: result.prompt_id }, { status: 202 });
+    const result = await (await comfy("/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph }) }, submitWorker)).json();
+    return Response.json({ id: pictureJobId(submitWorker, result.prompt_id) }, { status: 202 });
   } catch (error) {
     return failure(error);
   } finally {
@@ -181,10 +222,11 @@ export async function GET(request: Request) {
   if (denied) return denied;
   try {
     const url = new URL(request.url), id = url.searchParams.get("id") ?? "";
+    const { worker, id: nativeId } = parsePictureJobId(id);
     const item = await history(id);
     if (!item) {
-      const queue = await (await comfy("/queue")).json();
-      const waiting = [...queue.queue_running, ...queue.queue_pending].some((entry: unknown[]) => entry[1] === id);
+      const queue = await (await comfy("/queue", undefined, worker)).json();
+      const waiting = [...queue.queue_running, ...queue.queue_pending].some((entry: unknown[]) => entry[1] === nativeId);
       if (!waiting) throw new HttpError(404, "This job was removed or ComfyUI restarted. Generate the picture again.");
       return Response.json({ status: "processing" });
     }
@@ -200,7 +242,7 @@ export async function GET(request: Request) {
     if (!file) throw new HttpError(422, "ComfyUI returned no result. Check its console.");
     const base = `/api/picture?id=${encodeURIComponent(id)}`;
     if (!media) return Response.json({ status: "ready", url: `${base}&media=result`, ...(!isVideo ? { frame: `${base}&media=frame`, width: item.prompt![2]["3"].inputs.width, height: item.prompt![2]["3"].inputs.height } : {}) });
-    const response = await comfy(view(file), { headers: request.headers.has("Range") ? { Range: request.headers.get("Range")! } : {} });
+    const response = await comfy(view(file), { headers: request.headers.has("Range") ? { Range: request.headers.get("Range")! } : {} }, worker);
     return new Response(response.body, { status: response.status, headers: {
       "Content-Type": isVideo ? "video/mp4" : "image/png", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
       ...Object.fromEntries(["Content-Length", "Content-Range", "Accept-Ranges"].flatMap((key) => response.headers.has(key) ? [[key, response.headers.get(key)!]] : [])),

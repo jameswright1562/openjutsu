@@ -12,6 +12,17 @@ export type ModelSettings = {
 };
 export type ModelFiles = { models: string[]; loras: string[]; textEncoders: string[]; vaes: string[] };
 
+
+// A naming hint, not a guarantee of compatibility or an absence of safeguards.
+// ComfyUI must still be able to load the file with the workflow's CLIPLoader type.
+export function isAbliteratedModel(name: string): boolean {
+  return /abliterat|ablit/i.test(name);
+}
+
+export function abliteratedVisionModels(files: string[]): string[] {
+  return files.filter((name) => isAbliteratedModel(name) && /qwen.?3.?vl|gemma.?4/i.test(name));
+}
+
 export const DEFAULT_DESCRIBER = "qwen3vl_8b_int8_convrot.safetensors";
 
 export const DEFAULT_MODEL = {
